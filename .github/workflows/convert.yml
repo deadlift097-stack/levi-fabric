@@ -8,6 +8,9 @@ on:
       mc_versions:
         description: 'Bedrock versions for the manifest, JSON array'
         default: '["1.26.*"]'
+      overrides:
+        description: "Optional overrides json (default: overrides/<jar-name>.json if it exists)"
+        default: ""
       abi:
         description: "arm64-v8a | armeabi-v7a | all"
         default: "all"
@@ -28,7 +31,22 @@ jobs:
       - name: Convert
         run: |
           SYM=""; [ -f symbols.txt ] && SYM="--symbols symbols.txt"
-          levipack-forge convert input.jar -o generated --mc-versions '${{ inputs.mc_versions }}' $SYM
+          OV="${{ inputs.overrides }}"
+          if [ -z "$OV" ]; then
+            B="$(basename "${{ inputs.jar }}" .jar)"
+            [ -f "overrides/$B.json" ] && OV="overrides/$B.json"
+          fi
+          OVARG=""; [ -n "$OV" ] && OVARG="--overrides $OV" && echo "Using overrides: $OV"
+          levipack-forge convert input.jar -o generated --mc-versions '${{ inputs.mc_versions }}' $SYM $OVARG
+      - name: Build client-side Bedrock resource pack (.mcpack)
+        run: |
+          MID="$(python -c "import json;print(json.load(open('generated/levipack.project.json'))['mod_id'])")"
+          curl -fsSL https://raw.githubusercontent.com/Mojang/bedrock-samples/main/resource_pack/entity/player.entity.json -o vanilla_player.entity.json \
+            && mkdir -p "generated/resource_pack/entity" \
+            && levipack-forge pack-merge "generated/resource_pack/player.entity.patch.json" vanilla_player.entity.json \
+                 -o "generated/resource_pack/entity/player.entity.json" \
+            || echo "::warning::vanilla player.entity.json not available; pack built without the animation wiring"
+          (cd generated/resource_pack && rm -f player.entity.patch.json.bak && zip -qr "../${MID}.mcpack" . -x PACK_REPORT.md pack_map.todo.json)
       - name: Set up Android NDK (uses the SDK preinstalled on the runner)
         run: |
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
@@ -51,6 +69,11 @@ jobs:
           path: |
             generated/build-*/*.levipack
             generated/CONVERSION_REPORT.md
+            generated/MANUAL_WORK.md
+            generated/overrides.todo.json
+            generated/*.mcpack
+            generated/resource_pack/PACK_REPORT.md
+            generated/resource_pack/pack_map.todo.json
       - uses: actions/upload-artifact@v4
         with:
           name: generated-cpp-project
