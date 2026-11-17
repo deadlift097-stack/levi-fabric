@@ -20,6 +20,50 @@ cd out && ./scripts/package.ps1 -Abi all   # or push `out` to GitHub and let Act
 Or fully in the cloud: put the jar in `mods/`, run the **Convert Fabric mod -> .levipack** workflow
 (`Actions` tab). You get the `.levipack` files, the report and the generated C++ project as artifacts.
 
+## Closing the "needs manual work" items (v0.2)
+
+Every item the converter used to flag is now sorted into one of three buckets in `CONVERSION_REPORT.md`:
+
+| Bucket | What happens |
+|---|---|
+| **Auto-resolved** | `FabricLoader` / `ModContainer` / `ModMetadata` / `Optional` calls are folded into constants from `fabric.mod.json` (`isModLoaded("other-mod")` -> `false`, version -> the manifest version). Resource-reload listeners and builtin resource packs are dropped as having no Bedrock equivalent. Text components / resource ids become plain strings. Plain-Java helpers that never touch the game are inlined. All of it is listed, nothing is dropped silently. |
+| **Needs a native game hook** | Code that touches Minecraft/Fabric-API classes (transitively). Stub is emitted as `// GAP(levipack-forge)`, the report gives a category (commands, rendering, keybinds, ...) and a concrete way to solve it, and the mod logs one runtime warning so the gap is visible in-game. |
+| **Plain logic to port** | Branches/loops/objects outside the transpiler subset. |
+
+**No C++ editing needed:** `overrides.todo.json` is generated with one entry per open item. Decide per item
+(`ignore`, `returns`, or `cpp`), save it as `overrides/<jar-name>.json`, re-run. The fixes live outside the generated
+code, so re-converting a new mod version never loses them. See `overrides/README.md` and the generated `MANUAL_WORK.md` checklist.
+
+```bash
+levipack-forge convert mods/punchy-3.2b-fabric-26.3.jar -o out --overrides overrides/punchy-3.2b-fabric-26.3.json
+```
+
+Honest limit: code that really drives the Java game (rendering, animation, input) has no Bedrock counterpart to
+translate to; it needs native hooks or a Bedrock resource/behavior pack. The tool makes those items explicit,
+safe at runtime and fixable from data files instead of hand-edited C++.
+
+## Native hooks + client-side Bedrock resource pack (v0.3)
+
+Every conversion now also produces:
+
+| Output | What it is |
+|---|---|
+| `resource_pack/` | A **client-side Bedrock resource pack** (`manifest.json`, animations, geometries, sounds, textures, `.lang`). Blockbench-style Java animations are re-targeted to Bedrock names and bones (`right_arm` -> `rightArm`, ...). Animations that match a game state (sprint, swim, jump, riding...) get a generated animation controller with a Molang condition; the rest are listed in `pack_map.todo.json`. `player.entity.patch.json` is merged into Mojang's vanilla `player.entity.json` by `levipack-forge pack-merge` (the workflow does it and uploads a `.mcpack`). |
+| `src/mod/Hooks.cpp` | A native **hook registry**: one row per Java feature with no automatic equivalent, with Bedrock symbol candidates when you pass `--symbols`, logged at start-up, plus one `HOOK-POINT` where the verified hook goes (`<pl/memory/Hook.hpp>`). |
+| `cmd_*` config fields | Java client commands (`/punchy pos x y z`, ...) become typed launcher config fields. They reserve slots before static constants fill the config. The value is stored; a hook has to apply it. |
+| `resource_pack/PACK_REPORT.md` | What was converted, a self-check that every id resolves inside the pack, dropped bones, unmapped animations, non-convertible items. |
+
+`overrides/<jar>.json` also accepts `animation_conditions` (`{"anim_name": "molang"}` or `"ignore"`) and `bone_map`.
+`overrides/punchy-*.json` are the real overrides for the two bundled mods; `*.example.json` are kept untouched.
+
+```bash
+levipack-forge convert mods/punchy-3.2b-fabric-26.3.jar -o out --overrides overrides/punchy-3.2b-fabric-26.3.json --symbols symbols.txt
+levipack-forge pack-merge out/resource_pack/player.entity.patch.json vanilla/player.entity.json -o out/resource_pack/entity/player.entity.json
+```
+
+Status: unit-tested structure and self-check only; **not tested in-game**. Mods that compute animation in Java code
+(Punchy Moves) have no Bedrock animation data to convert, so their pack is nearly empty and the work stays in hooks.
+
 ## What it really converts
 
 Java and Bedrock are different games with different engines. There is no Java runtime inside Bedrock,
@@ -51,7 +95,9 @@ exact Bedrock version before hooking.
 ## Layout
 
 ```
-levipack_forge/        classfile parser, bytecode->C++ subset transpiler, symbol index, generator, CLI
+levipack_forge/        classfile parser, bytecode->C++ subset transpiler, solutions (fix advice), symbol index, generator, CLI
+overrides/             per-mod fixes for unsupported calls (survive re-conversion)
+examples/              sample reports generated from the two bundled jars
 levipack_forge/template/   the official template files used for every generated project
 reference/             pristine copy of the uploaded template
 .github/workflows/     ci.yml (tests), convert.yml (jar -> .levipack in the cloud)
