@@ -1,0 +1,11 @@
+{
+  "calls": {
+    "punchy.client.PunchyClient.init": {
+      "ignore": false,
+      "reason": "",
+      "cpp": "",
+      "returns": null,
+      "_help": "Needs a native hook (`<pl/memory/Hook.hpp>`). Run `levipack-forge symbols ...` and pass --symbols so each stub lists candidate Bedrock symbols, or declare a replacement in overrides.json."
+    }
+  }
+}

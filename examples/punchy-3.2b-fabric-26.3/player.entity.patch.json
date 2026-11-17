@@ -1,0 +1,50 @@
+{
+ "_note": "merge into the vanilla player.entity.json: `levipack-forge pack-merge`",
+ "animations": {
+  "punchy_swiming": "animation.punchy.swiming",
+  "punchy_swiming_ctl": "controller.animation.punchy.swiming",
+  "punchy_punchy_moves_sprint": "animation.punchy.punchy_moves_sprint",
+  "punchy_punchy_moves_sprint_ctl": "controller.animation.punchy.punchy_moves_sprint",
+  "punchy_punchy_moves_jump": "animation.punchy.punchy_moves_jump",
+  "punchy_punchy_moves_jump_ctl": "controller.animation.punchy.punchy_moves_jump",
+  "punchy_newhorse_riding_loop": "animation.punchy.newhorse_riding_loop",
+  "punchy_newhorse_riding_loop_ctl": "controller.animation.punchy.newhorse_riding_loop"
+ },
+ "animate": [
+  {
+   "punchy_swiming_ctl": "1.0"
+  },
+  {
+   "punchy_punchy_moves_sprint_ctl": "1.0"
+  },
+  {
+   "punchy_punchy_moves_jump_ctl": "1.0"
+  },
+  {
+   "punchy_newhorse_riding_loop_ctl": "1.0"
+  }
+ ],
+ "sound_effects": {
+  "load_bow": "punchy.animationssounds.load_bow",
+  "firstspinv2": "punchy.animationssounds.firstspinv2",
+  "spin2": "punchy.animationssounds.spin2",
+  "move3": "punchy.animationssounds.move3",
+  "sword-attack2": "punchy.animationssounds.sword-attack2",
+  "lastspinv2": "punchy.animationssounds.lastspinv2",
+  "move1": "punchy.animationssounds.move1",
+  "move2": "punchy.animationssounds.move2",
+  "move4": "punchy.animationssounds.move4",
+  "move32": "punchy.animationssounds.move32",
+  "hitrockv2": "punchy.animationssounds.hitrockv2",
+  "diamond": "punchy.animationssounds.diamond",
+  "punchy_cake_candle": "punchy.animationssounds.punchy_cake_candle",
+  "punchy_cake_ignite": "punchy.animationssounds.punchy_cake_ignite",
+  "punchy_cake_blow": "punchy.animationssounds.punchy_cake_blow",
+  "punchy_cake_cheer": "punchy.animationssounds.punchy_cake_cheer",
+  "punchy_gift_hop": "punchy.animationssounds.punchy_gift_hop",
+  "punchy_gift_lid": "punchy.animationssounds.punchy_gift_lid",
+  "punchy_gift_note": "punchy.animationssounds.punchy_gift_note",
+  "punchy_gift_drop": "punchy.animationssounds.punchy_gift_drop",
+  "punchy_gift_reveal": "punchy.animationssounds.punchy_gift_reveal"
+ }
+}
