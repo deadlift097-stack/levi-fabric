@@ -28,7 +28,7 @@ def test_parse_and_convert(tmp_path):
     assert "mConfig.greeting" in cpp
     assert 'self.getLogger().warn("Bye");' in cpp        # lifecycle STOPPING -> disable()
     assert "TODO(levipack-forge)" in cpp                # loop was not silently dropped
-    assert r["config_fields"] == 3
+    assert r["config_fields"] == 8   # 3 in HelloMod + 5 finite statics in Nasty
     cm = (tmp_path / "out/CMakeLists.txt").read_text()
     assert 'set(MOD_ID "hello_mod" CACHE' in cm
 
@@ -47,3 +47,12 @@ def test_rescue_truncated_zip(tmp_path):
     cut = tmp_path / "cut.zip"
     cut.write_bytes(full.read_bytes()[:-200])           # chop central directory
     assert "_ZN6Player4jumpEv" in symbols.build_index(cut)
+
+
+@pytest.mark.skipif(not FIX.exists(), reason="fixture jar missing")
+def test_config_defaults_are_valid_cpp(tmp_path):
+    generator.convert(FIX, tmp_path / "out")
+    h = (tmp_path / "out/src/mod/Config.h").read_text()
+    assert "= nan" not in h and "= inf" not in h          # NaN/Infinity statics are skipped
+    assert "delete_ = 1" in h and "register_ = true" in h  # C++ keywords are renamed
+    assert "(-9223372036854775807LL - 1)" in h
