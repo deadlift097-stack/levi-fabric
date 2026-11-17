@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, re, shutil, zipfile, pathlib
+import json, math, re, shutil, zipfile, pathlib
 from importlib import resources as _res
 from . import classfile as C, fabricmeta
 from .transpile import Transpiler, cstr
@@ -18,6 +18,16 @@ DEFAULT_MC = '["1.26.*"]'   # same default as the official template's CMakeLists
 PRIM = {"Z": ("bool", "false"), "I": ("int", "0"), "J": ("long long", "0"),
         "S": ("int", "0"), "B": ("int", "0"), "F": ("double", "0"), "D": ("double", "0"),
         "Ljava/lang/String;": ("std::string", '""')}
+
+
+CPP_RESERVED = set("""alignas alignof and and_eq asm auto bitand bitor bool break case catch char class compl concept
+const consteval constexpr constinit const_cast continue co_await co_return co_yield decltype default delete do double
+dynamic_cast else enum explicit export extern false float for friend goto if inline int long mutable namespace new
+noexcept not not_eq nullptr operator or or_eq private protected public register reinterpret_cast requires return short
+signed sizeof static static_assert static_cast struct switch template this thread_local throw true try typedef typeid
+typename union unsigned using virtual void volatile wchar_t while xor xor_eq NULL nan inf version enabled message""".split())
+MAX_STRING_LEN = 160
+MAX_CONFIG_FIELDS = 64    # boost::pfr reflection limit safety margin
 
 
 def ident(s):
@@ -85,8 +95,14 @@ def collect_config(classes, entry_classes):
             val = f.const_value if f.const_value is not None else init.get(f.name)
             if val is None or (final and not cfgish):
                 continue
+            if val[0] in ("float", "double") and not math.isfinite(val[1]):
+                continue          # NaN/Infinity cannot be stored in JSON config
+            if val[0] == "str" and len(val[1]) > MAX_STRING_LEN:
+                continue          # long text blobs are not settings; keep config.json small
+            if len(fields) >= MAX_CONFIG_FIELDS:
+                continue
             name = snake(f.name)
-            while name in used: name += "_"
+            while name in used or name in CPP_RESERVED: name += "_"
             used.add(name)
             fields[(cf.name, f.name)] = {"member": name, "desc": f.desc, "value": val,
                                          "java": f"{cf.name.replace('/', '.')}.{f.name}"}
@@ -98,6 +114,8 @@ def cpp_default(desc, val):
     if desc == "Z": return "true" if v else "false"
     if desc == "Ljava/lang/String;": return cstr(v) if k == "str" else '""'
     if k in ("float", "double"): return repr(float(v))
+    if desc == "J":
+        return "(-9223372036854775807LL - 1)" if v == -9223372036854775808 else f"{v}LL"
     return str(v)
 
 
