@@ -1,0 +1,50 @@
+name: Convert Fabric mod -> .levipack
+on:
+  workflow_dispatch:
+    inputs:
+      jar:
+        description: "Path to the Fabric .jar inside this repo (e.g. mods/my-mod.jar) or an https URL"
+        required: true
+      mc_versions:
+        description: 'Bedrock versions for the manifest, JSON array'
+        default: '["1.26.*"]'
+      abi:
+        description: "arm64-v8a | armeabi-v7a | all"
+        default: "all"
+jobs:
+  convert-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e .
+      - name: Fetch jar
+        run: |
+          case "${{ inputs.jar }}" in
+            http*) curl -fL "${{ inputs.jar }}" -o input.jar ;;
+            *)     cp "${{ inputs.jar }}" input.jar ;;
+          esac
+      - name: Convert
+        run: |
+          SYM=""; [ -f symbols.txt ] && SYM="--symbols symbols.txt"
+          levipack-forge convert input.jar -o generated --mc-versions '${{ inputs.mc_versions }}' $SYM
+      - uses: android-actions/setup-android@v3
+      - name: Install Android build tools
+        run: |
+          sdkmanager "platforms;android-28" "ndk;28.2.13676358"
+          sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Build .levipack
+        working-directory: generated
+        shell: pwsh
+        run: ./scripts/package.ps1 -Abi ${{ inputs.abi }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: levipack
+          path: |
+            generated/build-*/*.levipack
+            generated/CONVERSION_REPORT.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generated-cpp-project
+          path: generated
