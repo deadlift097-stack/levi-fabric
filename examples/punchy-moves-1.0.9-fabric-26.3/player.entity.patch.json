@@ -1,0 +1,6 @@
+{
+ "_note": "merge into the vanilla player.entity.json: `levipack-forge pack-merge`",
+ "animations": {},
+ "animate": [],
+ "sound_effects": {}
+}
