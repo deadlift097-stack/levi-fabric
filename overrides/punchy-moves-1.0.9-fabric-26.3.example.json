@@ -1,0 +1,8 @@
+{
+  "calls": {
+    "punchymoves.client.MovesClient.initialize": {
+      "ignore": true,
+      "reason": "Java update-check and game-version query; nothing to check on Bedrock"
+    }
+  }
+}

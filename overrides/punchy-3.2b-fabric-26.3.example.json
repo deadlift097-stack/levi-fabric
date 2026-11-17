@@ -1,0 +1,8 @@
+{
+  "calls": {
+    "punchy.client.command.PunchyCommands.register": {
+      "ignore": true,
+      "reason": "Brigadier client commands do not exist on Bedrock; the launcher config UI replaces them"
+    }
+  }
+}
