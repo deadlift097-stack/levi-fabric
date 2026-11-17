@@ -1,0 +1,229 @@
+from __future__ import annotations
+import json, re, shutil, zipfile, pathlib
+from importlib import resources as _res
+from . import classfile as C, fabricmeta
+from .transpile import Transpiler, cstr
+from .symbols import SymbolIndex
+from .cpp_templates import TEMPLATES
+
+TEMPLATE = pathlib.Path(__file__).parent / "template"
+DEFAULT_MC = '["1.26.*"]'   # same default as the official template's CMakeLists.txt
+PRIM = {"Z": ("bool", "false"), "I": ("int", "0"), "J": ("long long", "0"),
+        "S": ("int", "0"), "B": ("int", "0"), "F": ("double", "0"), "D": ("double", "0"),
+        "Ljava/lang/String;": ("std::string", '""')}
+
+
+def ident(s):
+    s = re.sub(r"[^0-9A-Za-z_]", "_", s)
+    return ("m_" + s) if not s or s[0].isdigit() else s
+
+
+def pascal(s):
+    return "".join(p.capitalize() for p in re.split(r"[^0-9A-Za-z]+", s) if p) or "Mod"
+
+
+def snake(s):
+    s = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", s)
+    return re.sub(r"[^0-9a-zA-Z]+", "_", s).strip("_").lower() or "value"
+
+
+def load_jar(path):
+    classes, files = {}, {}
+    with zipfile.ZipFile(path) as z:
+        for n in z.namelist():
+            if n.endswith("/"):
+                continue
+            data = z.read(n)
+            if n.endswith(".class") and not n.startswith("META-INF/"):
+                try:
+                    cf = C.parse(data); classes[cf.name] = cf
+                except Exception as e:      # keep going, report later
+                    files[n + ".unparsed"] = str(e).encode()
+            else:
+                files[n] = data
+    return classes, files
+
+
+def clinit_constants(cf):
+    """Return {field: constant tuple} for `const; putstatic` pairs in <clinit>."""
+    m = cf.find_method("<clinit>")
+    out = {}
+    if not m or not m.code:
+        return out
+    last = None
+    for i in C.decode(m.code):
+        if i.op in (2, 3, 4, 5, 6, 7, 8): last = ("int", i.op - 3)
+        elif i.op in (16, 17): last = ("int", i.arg)
+        elif i.op in (18, 19, 20):
+            v = cf.const(i.arg); last = v if isinstance(v, tuple) else ("str", v)
+        elif i.op == 179 and last is not None:
+            o, n, d = cf.ref(i.arg)
+            if o == cf.name: out[n] = last
+            last = None
+        else:
+            last = None
+    return out
+
+
+def collect_config(classes, entry_classes):
+    fields = {}   # (owner, name) -> dict
+    used = {"version", "enabled", "message"}
+    for cf in classes.values():
+        cfgish = any(k in cf.name.lower() for k in ("config", "settings", "options")) or cf.name in entry_classes
+        init = clinit_constants(cf)
+        for f in cf.fields:
+            if not (f.access & 0x0008) or f.desc not in PRIM:   # static + supported type
+                continue
+            final = bool(f.access & 0x0010)
+            val = f.const_value if f.const_value is not None else init.get(f.name)
+            if val is None or (final and not cfgish):
+                continue
+            name = snake(f.name)
+            while name in used: name += "_"
+            used.add(name)
+            fields[(cf.name, f.name)] = {"member": name, "desc": f.desc, "value": val,
+                                         "java": f"{cf.name.replace('/', '.')}.{f.name}"}
+    return fields
+
+
+def cpp_default(desc, val):
+    k, v = val
+    if desc == "Z": return "true" if v else "false"
+    if desc == "Ljava/lang/String;": return cstr(v) if k == "str" else '""'
+    if k in ("float", "double"): return repr(float(v))
+    return str(v)
+
+
+def convert(jar, out, mc_versions=None, symbols=None, mod_id=None):
+    out = pathlib.Path(out)
+    classes, files = load_jar(jar)
+    if "fabric.mod.json" not in files:
+        raise SystemExit("not a Fabric mod: fabric.mod.json missing in jar root")
+    meta = fabricmeta.parse(files["fabric.mod.json"].decode("utf-8-sig"))
+    mid = ident(mod_id or meta["id"]).lower()
+    base = pascal(mid)
+    ns, cls = mid, base if base.endswith("Mod") else base + "Mod"
+    sym = SymbolIndex.load(symbols) if symbols else None
+
+    entry_classes = {c for kind in ("main", "client", "server") for c, _ in meta["entrypoints"].get(kind, [])}
+    cfg = collect_config(classes, entry_classes)
+    cfg_names = {k: v["member"] for k, v in cfg.items()}
+
+    tp = Transpiler(classes, symbols=sym, cfg_fields=cfg_names)
+    entry_report = []
+    for kind in ("main", "client", "server"):
+        for c, meth in meta["entrypoints"].get(kind, []):
+            cf = classes.get(c)
+            if not cf:
+                tp.res.issues.append({"where": c, "what": "entrypoint class missing"}); continue
+            mn = meth or {"main": "onInitialize", "client": "onInitializeClient", "server": "onInitializeServer"}[kind]
+            entry_report.append(f"{kind}: {c.replace('/', '.')}.{mn}")
+            tp.res.enable.append(f"// --- entrypoint [{kind}] {c.replace('/', '.')}.{mn}")
+            tp.entry(c, mn, "enable")
+    res = tp.res
+
+    # ---------- project skeleton from the official template
+    if out.exists():
+        shutil.rmtree(out)
+    shutil.copytree(TEMPLATE, out, ignore=shutil.ignore_patterns("build.yml", "gitignore.txt"))
+    (out / "manifest.json.in").write_text(TEMPLATES["manifest.json"])
+    (out / ".gitignore").write_text("build*/\nconfig/\n.cache/\n")
+    (out / ".github/workflows").mkdir(parents=True, exist_ok=True)
+    shutil.copy(TEMPLATE / "build.yml", out / ".github/workflows/build.yml")
+
+    mc = mc_versions or DEFAULT_MC
+    library = re.sub(r"[^0-9A-Za-z_]", "_", mid)
+    icon_rel = ""
+    if meta["icon"] and meta["icon"] in files:
+        icon_rel = "icon" + pathlib.Path(meta["icon"]).suffix
+        (out / icon_rel).write_bytes(files[meta["icon"]])
+
+    cm = (out / "CMakeLists.txt").read_text()
+    for key, val in (("MOD_ID", mid), ("MOD_NAME", meta["name"]), ("MOD_AUTHOR", ", ".join(meta["authors"]) or mid),
+                     ("MOD_VERSION", meta["version"]), ("MOD_LIBRARY_NAME", library)):
+        cm = re.sub(rf'set\({key} "[^"]*" CACHE', lambda m, v=val, k=key: f'set({k} "{v}" CACHE', cm)
+    cm = re.sub(r'set\(MOD_MINECRAFT_VERSIONS "[^\n]*?" CACHE',
+                lambda m: 'set(MOD_MINECRAFT_VERSIONS "' + mc.replace('"', '\\"') + '" CACHE', cm)
+    cm = re.sub(r'set\(MOD_ICON "[^"]*" CACHE', lambda m: f'set(MOD_ICON "{icon_rel}" CACHE', cm)
+    # experimental: ship converted Java assets (lang files) next to the library
+    cm = cm.replace("set(LEVI_PACKAGE_ICON_COMMAND)",
+                    "set(LEVI_PACKAGE_ICON_COMMAND)\nset(LEVI_PACKAGE_RESOURCES_COMMAND)\n"
+                    "if(IS_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}/resources\")\n"
+                    "    set(LEVI_PACKAGE_RESOURCES_COMMAND\n"
+                    "        COMMAND \"${CMAKE_COMMAND}\" -E copy_directory \"${CMAKE_CURRENT_SOURCE_DIR}/resources\" \"${LEVI_PACKAGE_MOD_DIR}/resources\")\n"
+                    "endif()")
+    cm = cm.replace("    ${LEVI_PACKAGE_CONFIG_COMMAND}\n    COMMAND", "    ${LEVI_PACKAGE_CONFIG_COMMAND}\n    ${LEVI_PACKAGE_RESOURCES_COMMAND}\n    COMMAND")
+    (out / "CMakeLists.txt").write_text(cm)
+
+    # ---------- sources
+    def tpl(name, **kw):
+        s = TEMPLATES[name]
+        for k, v in kw.items():
+            s = s.replace(f"@{k}@", v)
+        return s
+
+    cfg_lines, schema_lines = [], []
+    for (o, n), f in cfg.items():
+        t, _ = PRIM[f["desc"]]
+        cfg_lines.append(f"    {t} {f['member']} = {cpp_default(f['desc'], f['value'])}; // {f['java']}")
+        schema_lines.append(f'        if (name == "{f["member"]}")\n'
+                            f'            return {{.title = {cstr(f["member"].replace("_", " ").title())}, '
+                            f'.description = {cstr("Imported from Java field " + f["java"])}}};')
+    indent = lambda ls: "\n".join("    " + l for l in ls) if ls else "    // (nothing converted)"
+    (out / "src/mod").mkdir(parents=True, exist_ok=True)
+    kw = dict(NS=ns, CLS=cls, MODNAME=meta["name"], MODID=mid, TITLE=cstr(meta["name"] + " Config"),
+              CONFIG_FIELDS="\n".join(cfg_lines), SCHEMA_FIELDS="\n".join(schema_lines),
+              ENABLE_BODY=indent(res.enable), DISABLE_BODY=indent(res.disable))
+    for n in ("MyMod.h", "MyMod.cpp", "Config.h", "Config.cpp"):
+        (out / "src/mod" / n).write_text(tpl(n, **kw))
+    for n in ("main.cpp", "config_generator.cpp"):
+        s = (out / "src" / n).read_text().replace("ClangeMeMod", cls).replace("clange_me", ns)
+        (out / "src" / n).write_text(s)
+
+    # ---------- assets: Java lang json -> .lang (experimental)
+    lang_out = []
+    for n, data in files.items():
+        m = re.match(r"assets/[^/]+/lang/([a-z]{2})_([a-z]{2})\.json$", n)
+        if m:
+            try:
+                j = json.loads(data.decode("utf-8"))
+            except Exception:
+                continue
+            lines = [f"{k}={str(v).replace(chr(10), ' ')}" for k, v in j.items() if isinstance(v, str)]
+            p = out / "resources/texts" / f"{m.group(1)}_{m.group(2).upper()}.lang"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("\n".join(lines) + "\n", encoding="utf-8"); lang_out.append(p.name)
+
+    # ---------- report
+    unconverted = sorted({c.name for c in classes.values() if c.name not in {e[0] for e in
+                          [(x, None) for x in entry_classes]}})
+    rep = [f"# Conversion report: {meta['name']} ({meta['version']})", "",
+           f"* Fabric mod id: `{meta['id']}`  ->  C++ namespace `{ns}`, class `{cls}`",
+           f"* Entrypoints: {', '.join(entry_report) or 'none found'}",
+           f"* Java classes in jar: {len(classes)}; methods fully converted: {res.converted}; "
+           f"stubs left for manual work: {res.stubbed}",
+           f"* Config fields imported from static Java fields: {len(cfg)}",
+           f"* Language files converted: {', '.join(lang_out) or 'none'}", "",
+           "## What converted automatically",
+           "Straight-line entrypoint code: logger / System.out calls, Fabric lifecycle events "
+           "(started/stopping -> `enable()` / `disable()`), static constants -> typed config.", "",
+           "## What needs manual work", ]
+    if res.issues:
+        for it in res.issues:
+            rep.append(f"* `{it['where']}` - {it['what']}")
+    else:
+        rep.append("* nothing flagged")
+    rep += ["", "## Not converted (by design)",
+            "Java classes other than the entrypoints, mixins, Minecraft Java API calls, textures/models/data packs. "
+            "Bedrock has no Java classes; every game-facing call needs a native hook via `<pl/memory/Hook.hpp>` "
+            "(see the symbol candidates printed next to each TODO when `--symbols` is supplied)."]
+    (out / "CONVERSION_REPORT.md").write_text("\n".join(rep) + "\n")
+    (out / "levipack.project.json").write_text(json.dumps(
+        {"source_jar": pathlib.Path(jar).name, "mod_id": mid, "minecraft_versions": json.loads(mc),
+         "forge_version": __import__("levipack_forge").__version__}, indent=2) + "\n")
+    (out / "README.md").write_text(
+        f"# {meta['name']} (LeviLauncher Android port)\n\nGenerated by levipack-forge from a Fabric mod.\n"
+        f"Read `CONVERSION_REPORT.md` first, finish the `TODO(levipack-forge)` items in `src/mod/MyMod.cpp`,\n"
+        f"then build with `./scripts/package.ps1 -Abi all` or push to GitHub (Actions builds the `.levipack`).\n")
+    return {"out": str(out), "issues": res.issues, "converted": res.converted, "stubbed": res.stubbed,
+            "config_fields": len(cfg), "mod_id": mid}
