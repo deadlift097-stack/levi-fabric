@@ -4,6 +4,7 @@ from importlib import resources as _res
 from . import classfile as C, fabricmeta
 from .transpile import Transpiler, cstr
 from .symbols import SymbolIndex
+from . import commands as cmdmod, hooks as hookmod, bedrock_pack
 
 TEMPLATES = {
     'MyMod.h': '#pragma once\n\n#include <optional>\n\n#include "mod/Config.h"\n\n#include <pl/Mod.hpp>\n\nnamespace @NS@ {\n\nclass @CLS@ {\n  public:\n    static @CLS@ &instance();\n\n    @CLS@();\n\n    [[nodiscard]] ll::mod::NativeMod &getSelf() const { return mSelf; }\n\n    bool load();\n    bool enable();\n    bool disable();\n    bool unload();\n\n  private:\n    ll::mod::NativeMod &mSelf;\n    ModConfig mConfig;\n    std::optional<pl::config::ConfigFile<ModConfig>> mConfigFile;\n};\n\n} // namespace @NS@\n',
@@ -82,7 +83,7 @@ def clinit_constants(cf):
     return out
 
 
-def collect_config(classes, entry_classes):
+def collect_config(classes, entry_classes, reserve=0):
     fields = {}   # (owner, name) -> dict
     used = {"version", "enabled", "message"}
     for cf in classes.values():
@@ -99,7 +100,7 @@ def collect_config(classes, entry_classes):
                 continue          # NaN/Infinity cannot be stored in JSON config
             if val[0] == "str" and len(val[1]) > MAX_STRING_LEN:
                 continue          # long text blobs are not settings; keep config.json small
-            if len(fields) >= MAX_CONFIG_FIELDS:
+            if len(fields) >= MAX_CONFIG_FIELDS - reserve:
                 continue
             name = snake(f.name)
             while name in used or name in CPP_RESERVED: name += "_"
@@ -119,7 +120,7 @@ def cpp_default(desc, val):
     return str(v)
 
 
-def convert(jar, out, mc_versions=None, symbols=None, mod_id=None):
+def convert(jar, out, mc_versions=None, symbols=None, mod_id=None, overrides=None):
     out = pathlib.Path(out)
     classes, files = load_jar(jar)
     if "fabric.mod.json" not in files:
@@ -131,10 +132,16 @@ def convert(jar, out, mc_versions=None, symbols=None, mod_id=None):
     sym = SymbolIndex.load(symbols) if symbols else None
 
     entry_classes = {c for kind in ("main", "client", "server") for c, _ in meta["entrypoints"].get(kind, [])}
-    cfg = collect_config(classes, entry_classes)
+    commands, cmd_classes = cmdmod.find_commands(classes)
+    cmd_fields = cmdmod.config_fields(commands)
+    cfg = collect_config(classes, entry_classes, reserve=len(cmd_fields))
     cfg_names = {k: v["member"] for k, v in cfg.items()}
 
-    tp = Transpiler(classes, symbols=sym, cfg_fields=cfg_names)
+    ov = {}
+    if overrides:
+        ov = json.loads(pathlib.Path(overrides).read_text(encoding="utf-8"))
+    tp = Transpiler(classes, symbols=sym, cfg_fields=cfg_names, meta=meta, overrides=ov, mod_id=meta["id"],
+                    cmd_classes=cmd_classes, commands=commands)
     entry_report = []
     for kind in ("main", "client", "server"):
         for c, meth in meta["entrypoints"].get(kind, []):
@@ -195,13 +202,29 @@ def convert(jar, out, mc_versions=None, symbols=None, mod_id=None):
         schema_lines.append(f'        if (name == "{f["member"]}")\n'
                             f'            return {{.title = {cstr(f["member"].replace("_", " ").title())}, '
                             f'.description = {cstr("Imported from Java field " + f["java"])}}};')
+    taken = {f["member"] for f in cfg.values()} | {"version", "enabled", "message"}
+    for f in cmd_fields:
+        while f["member"] in taken:
+            f["member"] += "_"
+        taken.add(f["member"])
+        cfg_lines.append(f"    {f['type']} {f['member']} = {f['default']}; // command")
+        schema_lines.append(f'        if (name == "{f["member"]}")\n'
+                            f'            return {{.title = {cstr(f["title"])}, .description = {cstr(f["desc"])}}};')
     indent = lambda ls: "\n".join("    " + l for l in ls) if ls else "    // (nothing converted)"
     (out / "src/mod").mkdir(parents=True, exist_ok=True)
+    res.enable.append("hooks::installAll(self);")
+    res.disable.append("hooks::uninstallAll(self);")
     kw = dict(NS=ns, CLS=cls, MODNAME=meta["name"], MODID=mid, TITLE=cstr(meta["name"] + " Config"),
               CONFIG_FIELDS="\n".join(cfg_lines), SCHEMA_FIELDS="\n".join(schema_lines),
               ENABLE_BODY=indent(res.enable), DISABLE_BODY=indent(res.disable))
     for n in ("MyMod.h", "MyMod.cpp", "Config.h", "Config.cpp"):
         (out / "src/mod" / n).write_text(tpl(n, **kw))
+    hh, hc = hookmod.render(ns, res.issues, commands, sym)
+    (out / "src/mod/Hooks.h").write_text(hh)
+    (out / "src/mod/Hooks.cpp").write_text(hc)
+    cm2 = (out / "CMakeLists.txt").read_text()
+    assert cm2.count("    src/mod/MyMod.cpp") == 1
+    (out / "CMakeLists.txt").write_text(cm2.replace("    src/mod/MyMod.cpp", "    src/mod/MyMod.cpp\n    src/mod/Hooks.cpp"))
     for n in ("main.cpp", "config_generator.cpp"):
         s = (out / "src" / n).read_text().replace("ClangeMeMod", cls).replace("clange_me", ns)
         (out / "src" / n).write_text(s)
@@ -220,30 +243,90 @@ def convert(jar, out, mc_versions=None, symbols=None, mod_id=None):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("\n".join(lines) + "\n", encoding="utf-8"); lang_out.append(p.name)
 
+    # ---------- Bedrock resource pack (client side)
+    pack_rep = bedrock_pack.build_pack(files, meta, mid, out / "resource_pack", mc, ov)
+    (out / "resource_pack/PACK_REPORT.md").write_text(bedrock_pack.pack_report(pack_rep, mid))
+
     # ---------- report
-    unconverted = sorted({c.name for c in classes.values() if c.name not in {e[0] for e in
-                          [(x, None) for x in entry_classes]}})
+    gaps = [i for i in res.issues if i["kind"] == "gap"]
+    manual = [i for i in res.issues if i["kind"] != "gap"]
+    extra_resolved = []
+    if "modmenu" in meta["entrypoints"]:
+        extra_resolved.append({"where": "fabric.mod.json entrypoints.modmenu", "what": "Mod Menu config screen",
+                               "how": "replaced by the typed config the launcher shows (config.json + schema)"})
+    unused = sorted(set(ov.get("calls", {})) - tp.used_overrides)
     rep = [f"# Conversion report: {meta['name']} ({meta['version']})", "",
            f"* Fabric mod id: `{meta['id']}`  ->  C++ namespace `{ns}`, class `{cls}`",
            f"* Entrypoints: {', '.join(entry_report) or 'none found'}",
            f"* Java classes in jar: {len(classes)}; methods fully converted: {res.converted}; "
            f"stubs left for manual work: {res.stubbed}",
+           f"* Handled automatically: {len(res.resolved) + len(extra_resolved)}; "
+           f"need a native game hook: {len(gaps)}; plain logic to port: {len(manual)}",
            f"* Config fields imported from static Java fields: {len(cfg)}",
            f"* Language files converted: {', '.join(lang_out) or 'none'}", "",
            "## What converted automatically",
            "Straight-line entrypoint code: logger / System.out calls, Fabric lifecycle events "
-           "(started/stopping -> `enable()` / `disable()`), static constants -> typed config.", "",
-           "## What needs manual work", ]
-    if res.issues:
-        for it in res.issues:
-            rep.append(f"* `{it['where']}` - {it['what']}")
-    else:
+           "(started/stopping -> `enable()` / `disable()`), static constants -> typed config.", ""]
+    rep.append("### Auto-resolved (no manual work)")
+    for it in res.resolved + extra_resolved:
+        rep.append(f"* `{it['what']}` - {it['how']}")
+    if not (res.resolved or extra_resolved):
+        rep.append("* nothing")
+    rep += ["", "## What needs manual work"]
+    if not res.issues:
         rep.append("* nothing flagged")
-    rep += ["", "## Not converted (by design)",
+    for title, items in (("Needs a native game hook", gaps), ("Plain logic / bytecode to port", manual)):
+        if not items:
+            continue
+        rep += ["", f"### {title}"]
+        for it in items:
+            rep.append(f"* `{it['where']}` - {it['what']}")
+            rep.append(f"  * **{it['category']}**: {it['fix']}")
+    if unused:
+        rep += ["", "### Unused overrides", *[f"* `{k}` matched nothing (typo or already handled)" for k in unused]]
+    rep += ["", "## Bedrock resource pack (client side)",
+            f"`resource_pack/` holds {pack_rep['animations']} animations ({pack_rep['mapped']} wired to game states), "
+            f"{pack_rep['geometries']} geometries, {pack_rep['sounds']} sounds, {pack_rep['textures']} textures. "
+            "See `resource_pack/PACK_REPORT.md`.",
+            "", "## Native hooks",
+            "`src/mod/Hooks.cpp` lists every gap above as a hook entry (with Bedrock symbol candidates when `--symbols` is given); "
+            "it is logged at start-up. Client commands were turned into `cmd_*` launcher config fields "
+            f"({len(cmd_fields)} fields from {len(commands)} commands).",
+            "", "## How to solve the open items without editing generated C++",
+            "Fill `overrides.todo.json` (one pre-made entry per open item), save it as `overrides/<mod>.json`, "
+            "and run the conversion again (`--overrides overrides/<mod>.json`, or the workflow's `overrides` input). "
+            "Fixes live outside the generated code, so they survive every re-conversion. See MANUAL_WORK.md.",
+            "", "## Not converted (by design)",
             "Java classes other than the entrypoints, mixins, Minecraft Java API calls, textures/models/data packs. "
             "Bedrock has no Java classes; every game-facing call needs a native hook via `<pl/memory/Hook.hpp>` "
             "(see the symbol candidates printed next to each TODO when `--symbols` is supplied)."]
     (out / "CONVERSION_REPORT.md").write_text("\n".join(rep) + "\n")
+
+    # ---------- MANUAL_WORK.md + overrides.todo.json
+    todo, seen_keys = {}, set()
+    for it in res.issues:
+        k = it.get("key")
+        if k and k not in seen_keys:
+            seen_keys.add(k)
+            todo[k] = {"ignore": False, "reason": "", "cpp": "", "returns": None, "_help": it["fix"]}
+    (out / "overrides.todo.json").write_text(json.dumps({"calls": todo}, indent=2) + "\n")
+    mw = [f"# Manual work for {meta['name']}", "",
+          "Everything below is what levipack-forge could not convert. Each item has a ready fix path.", "",
+          "## Three ways to close an item", "",
+          "1. **Ignore it** - client-only visuals, key bindings, debug commands: set `\"ignore\": true` and a reason.",
+          "2. **Give a value** - version/capability queries: set `\"returns\": {\"bool\": false}` (or int/str/double).",
+          "3. **Give the C++ once** - set `\"cpp\": \"...\"` (`{0}`, `{1}` = call arguments). It is spliced in on every conversion.", "",
+          "Save the edited `overrides.todo.json` as `overrides/<mod>.json` in the converter repo and re-run.", ""]
+    by_cat = {}
+    for it in res.issues:
+        by_cat.setdefault(it["category"], []).append(it)
+    for cat, items in sorted(by_cat.items()):
+        mw += [f"## {cat} ({len(items)})", "", items[0]["fix"], ""]
+        mw += [f"- [ ] `{i['what']}`  (in `{i['where']}`)" for i in items]
+        mw.append("")
+    if not res.issues:
+        mw.append("Nothing to do.")
+    (out / "MANUAL_WORK.md").write_text("\n".join(mw) + "\n")
     (out / "levipack.project.json").write_text(json.dumps(
         {"source_jar": pathlib.Path(jar).name, "mod_id": mid, "minecraft_versions": json.loads(mc),
          "forge_version": __import__("levipack_forge").__version__}, indent=2) + "\n")
@@ -252,4 +335,4 @@ def convert(jar, out, mc_versions=None, symbols=None, mod_id=None):
         f"Read `CONVERSION_REPORT.md` first, finish the `TODO(levipack-forge)` items in `src/mod/MyMod.cpp`,\n"
         f"then build with `./scripts/package.ps1 -Abi all` or push to GitHub (Actions builds the `.levipack`).\n")
     return {"out": str(out), "issues": res.issues, "converted": res.converted, "stubbed": res.stubbed,
-            "config_fields": len(cfg), "mod_id": mid}
+            "config_fields": len(cfg) + len(cmd_fields), "pack": {k: pack_rep[k] for k in ("animations", "mapped", "geometries", "sounds", "textures")}, "mod_id": mid, "resolved": len(res.resolved) + len(extra_resolved)}

@@ -13,6 +13,7 @@ def main(argv=None):
     c.add_argument("--mc-versions", help='JSON array for the manifest, e.g. \'["1.26.*"]\'')
     c.add_argument("--symbols", help="symbol index (.txt), libminecraftpe.so or the zip containing it")
     c.add_argument("--mod-id")
+    c.add_argument("--overrides", help="overrides.json with fixes for unsupported calls (survives re-conversion)")
 
     s = sub.add_parser("symbols", help="work with the Bedrock symbol index")
     ss = s.add_subparsers(dest="scmd", required=True)
@@ -21,12 +22,21 @@ def main(argv=None):
     q = ss.add_parser("search", help="find mangled names containing all given identifiers")
     q.add_argument("index"); q.add_argument("names", nargs="+"); q.add_argument("-n", type=int, default=20)
 
+    pm = sub.add_parser("pack-merge", help="merge resource_pack/player.entity.patch.json into the vanilla player.entity.json")
+    pm.add_argument("patch"); pm.add_argument("vanilla"); pm.add_argument("-o", "--out", required=True)
+
     a = ap.parse_args(argv)
     if a.cmd == "convert":
         from .generator import convert
-        r = convert(a.jar, a.out, a.mc_versions, a.symbols, a.mod_id)
+        r = convert(a.jar, a.out, a.mc_versions, a.symbols, a.mod_id, a.overrides)
         print(json.dumps(r, indent=2))
         print(f"\nNext: read {r['out']}/CONVERSION_REPORT.md, then build (see README).")
+    elif a.cmd == "pack-merge":
+        from .bedrock_pack import merge_player_entity
+        v = json.load(open(a.vanilla, encoding="utf-8-sig"))
+        m = merge_player_entity(v, json.load(open(a.patch, encoding="utf-8")))
+        json.dump(m, open(a.out, "w", encoding="utf-8"), indent=1)
+        print(f"merged -> {a.out}")
     else:
         from .symbols import SymbolIndex, build_index
         if a.scmd == "index":
