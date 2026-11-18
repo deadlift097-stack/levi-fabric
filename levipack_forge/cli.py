@@ -11,7 +11,7 @@ def main(argv=None):
     c = sub.add_parser("convert", help="convert a Fabric jar into a buildable native-mod project")
     c.add_argument("jar"); c.add_argument("-o", "--out", default="out")
     c.add_argument("--mc-versions", help='JSON array for the manifest, e.g. \'["1.26.*"]\'')
-    c.add_argument("--symbols", help="symbol index (.txt), libminecraftpe.so or the zip containing it")
+    c.add_argument("--symbols", help="symbol index (.txt), libminecraftpe.so, the zip containing it, or a *.symbols.json (default: the bundled DB)")
     c.add_argument("--mod-id")
     c.add_argument("--overrides", help="overrides.json with fixes for unsupported calls (survives re-conversion)")
 
@@ -25,8 +25,20 @@ def main(argv=None):
     pm = sub.add_parser("pack-merge", help="merge resource_pack/player.entity.patch.json into the vanilla player.entity.json")
     pm.add_argument("patch"); pm.add_argument("vanilla"); pm.add_argument("-o", "--out", required=True)
 
+    pi = sub.add_parser("pack-install", help="copy resource_pack/ into resources/minecraft_resource_packs/<Name>/ so the .levipack ships it")
+    pi.add_argument("project", help="generated project folder (contains levipack.project.json)")
+    pi.add_argument("--force", action="store_true", help="install even if the pack has no content besides the manifest")
+
+    lt = sub.add_parser("live-test", help="generate the on-device proof project: hooks Item::getAttackDamage and adds N")
+    lt.add_argument("-o", "--out", default="live-test"); lt.add_argument("--bonus", type=int, default=3)
+    lt.add_argument("--mc-versions"); lt.add_argument("--symbols", help="a *.symbols.json (default: the bundled DB)")
+
     a = ap.parse_args(argv)
-    if a.cmd == "convert":
+    if a.cmd == "live-test":
+        from .livetest import generate
+        r = generate(a.out, a.bonus, a.mc_versions, a.symbols)
+        print(json.dumps(r, indent=2)); print(f"\nRead {r['out']}/LIVE_TEST.md, then build (push to GitHub: live-test workflow, or scripts/package.ps1).")
+    elif a.cmd == "convert":
         from .generator import convert
         r = convert(a.jar, a.out, a.mc_versions, a.symbols, a.mod_id, a.overrides)
         print(json.dumps(r, indent=2))
@@ -37,6 +49,14 @@ def main(argv=None):
         m = merge_player_entity(v, json.load(open(a.patch, encoding="utf-8")))
         json.dump(m, open(a.out, "w", encoding="utf-8"), indent=1)
         print(f"merged -> {a.out}")
+    elif a.cmd == "pack-install":
+        import pathlib
+        from .bedrock_pack import install_pack
+        proj = pathlib.Path(a.project)
+        meta = proj / "levipack.project.json"
+        mid = json.loads(meta.read_text())["mod_id"] if meta.exists() else proj.resolve().name
+        dst = install_pack(proj, mid, only_if_content=not a.force)
+        print(f"installed -> {dst}" if dst else "nothing to install (no resource_pack/ or it only has a manifest)")
     else:
         from .symbols import SymbolIndex, build_index
         if a.scmd == "index":

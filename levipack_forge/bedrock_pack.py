@@ -5,7 +5,7 @@ sounds, textures). Those are re-targeted to Bedrock names and wired through gene
 Everything that cannot be mapped is listed in PACK_REPORT.md; nothing is dropped silently.
 """
 from __future__ import annotations
-import json, re, uuid, pathlib
+import json, re, shutil, uuid, pathlib
 
 ANIM_KEYS = {"animation_length", "bones", "loop", "timeline", "sound_effects", "particle_effects",
              "override_previous_animation", "anim_time_update", "blend_weight", "start_delay", "loop_delay"}
@@ -178,14 +178,24 @@ def build_pack(files, meta, mid, out, mc_versions='["1.26.*"]', overrides=None):
         write("sounds/sound_definitions.json", json.dumps({"format_version": "1.14.0", "sound_definitions": events}, indent=1))
 
     # ---------------- textures (Java GUI atlas textures have no Bedrock meaning)
+    vanilla_skipped, gui_skipped = 0, 0
     for n in sorted(files):
         m = re.match(r"(?:resourcepacks/[^/]+/)?assets/([^/]+)/textures/(.+\.png)$", n)
         if not m:
             continue
         ns, rel = m.groups()
-        if ns == "minecraft" or rel.startswith(("gui/", "font/")):
-            continue
+        if ns == "minecraft":
+            vanilla_skipped += 1; continue
+        if rel.startswith(("gui/", "font/")):
+            gui_skipped += 1; continue
         write(f"textures/{mid}/{ns}/{rel}", files[n]); rep["textures"] += 1
+    if vanilla_skipped:      # never drop silently
+        rep["unconverted"].append(
+            f"{vanilla_skipped} texture(s) under assets/minecraft/ replace vanilla Java textures; Bedrock uses other paths and names. "
+            "Map them by hand into the pack; files that live inside the game APK (start screen, materials, cameras) "
+            "need the AssetsAPI levipack (assetsapi_set_file_resource_pack), see docs/research/levipack-learnings.txt section 6B")
+    if gui_skipped:
+        rep["unconverted"].append(f"{gui_skipped} Java gui/font texture(s) skipped: Java GUI atlases have no Bedrock meaning (use a JSON UI pack)")
 
     # ---------------- language
     langs = []
@@ -273,7 +283,9 @@ def pack_report(rep, mid):
          f"{len(rep['unmapped'])} left unmapped",
          f"* geometries: {rep['geometries']}; sounds: {rep['sounds']}; textures: {rep['textures']}; "
          f"languages: {', '.join(rep['lang']) or 'none'}", "",
-         "Install: zip the `resource_pack/` folder as `.mcpack` (CI does this) or import it with the launcher. "
+         "Install: the pack ships **inside the `.levipack`** at `resources/minecraft_resource_packs/<Name>/` "
+         "(`levipack-forge pack-install <project>`; `convert` runs it, and the CI workflow runs it again after `pack-merge`). "
+         "It can also be zipped as a standalone `.mcpack` (CI does this). "
          "The animations are merged into the vanilla `player.entity.json` with `levipack-forge pack-merge` "
          "(the CI workflow does this automatically). **Not tested in-game.**", ""]
     if not rep["animations"] and not rep["geometries"]:
@@ -304,3 +316,36 @@ def merge_player_entity(vanilla: dict, patch: dict) -> dict:
     if patch.get("sound_effects"):
         d.setdefault("sound_effects", {}).update(patch["sound_effects"])
     return vanilla
+
+
+# Files that belong to the converter's working folder, not to the pack the game loads.
+PACK_DEV_FILES = {"PACK_REPORT.md", "pack_map.todo.json", "player.entity.patch.json"}
+# `texts` is deliberately absent: a pack that only carries converted .lang files adds nothing (Java translation keys do
+# not match Bedrock's) and the same files already ship as the experimental resources/texts/*.lang.
+PACK_CONTENT_DIRS = ("animations", "animation_controllers", "entity", "models", "sounds", "textures")
+
+
+def pack_folder_name(mid: str) -> str:
+    """`punchy_moves` -> `PunchyMoves` (working levipacks name the folder like BetterBoatTrails)."""
+    return "".join(p.capitalize() for p in re.split(r"[^0-9A-Za-z]+", mid) if p) or "Pack"
+
+
+def install_pack(project, mid: str, only_if_content: bool = True):
+    """Copy <project>/resource_pack into <project>/resources/minecraft_resource_packs/<Name>/.
+
+    The levipack package step copies `resources/` into the archive and nothing else, so a pack that stays in
+    `resource_pack/` never reaches the game (every working levipack ships it at this path). Re-run after
+    `pack-merge` so the merged player.entity.json is the one that gets packaged.
+    Returns the destination, or None when there is nothing worth shipping.
+    """
+    project = pathlib.Path(project)
+    src = project / "resource_pack"
+    if not (src / "manifest.json").exists():
+        return None
+    if only_if_content and not any((src / d).exists() and any((src / d).rglob("*")) for d in PACK_CONTENT_DIRS):
+        return None
+    dst = project / "resources" / "minecraft_resource_packs" / pack_folder_name(mid)
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst, ignore=lambda d, names: [n for n in names if pathlib.Path(d) == src and n in PACK_DEV_FILES])
+    return dst
