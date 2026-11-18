@@ -25,10 +25,10 @@ Straight-line entrypoint code: logger / System.out calls, Fabric lifecycle event
   * **Game API**: Needs a native hook (`<pl/memory/Hook.hpp>`). Run `levipack-forge symbols ...` and pass --symbols so each stub lists candidate Bedrock symbols, or declare a replacement in overrides.json.
 
 ## Bedrock resource pack (client side)
-`resource_pack/` holds 230 animations (4 wired to game states), 6 geometries, 22 sounds, 14 textures. See `resource_pack/PACK_REPORT.md`.
+`resource_pack/` holds 230 animations (4 wired to game states), 6 geometries, 22 sounds, 14 textures. Shipped inside the `.levipack` at `resources/minecraft_resource_packs/Punchy/`. See `resource_pack/PACK_REPORT.md`.
 
 ## Native hooks
-`src/mod/Hooks.cpp` lists every gap above as a hook entry (with Bedrock symbol candidates when `--symbols` is given); it is logged at start-up. Client commands were turned into `cmd_*` launcher config fields (8 fields from 4 commands).
+`src/mod/Hooks.cpp` lists every gap above as a hook entry (with Bedrock symbol candidates when `--symbols` is given); it is logged at start-up. Targets with static evidence in the bundled symbol DB are resolved and prologue-checked at start-up (`Resolve.cpp`); everything else stays a logged TODO. Client commands were turned into `cmd_*` launcher config fields (8 fields from 4 commands).
 
 ## How to solve the open items without editing generated C++
 Fill `overrides.todo.json` (one pre-made entry per open item), save it as `overrides/<mod>.json`, and run the conversion again (`--overrides overrides/<mod>.json`, or the workflow's `overrides` input). Fixes live outside the generated code, so they survive every re-conversion. See MANUAL_WORK.md.

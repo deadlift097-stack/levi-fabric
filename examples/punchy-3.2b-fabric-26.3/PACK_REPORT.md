@@ -3,7 +3,7 @@
 * animations: 230 converted, 4 wired to game states automatically, 226 left unmapped
 * geometries: 6; sounds: 22; textures: 14; languages: en_US, pt_BR
 
-Install: zip the `resource_pack/` folder as `.mcpack` (CI does this) or import it with the launcher. The animations are merged into the vanilla `player.entity.json` with `levipack-forge pack-merge` (the CI workflow does this automatically). **Not tested in-game.**
+Install: the pack ships **inside the `.levipack`** at `resources/minecraft_resource_packs/<Name>/` (`levipack-forge pack-install <project>`; `convert` runs it, and the CI workflow runs it again after `pack-merge`). It can also be zipped as a standalone `.mcpack` (CI does this). The animations are merged into the vanilla `player.entity.json` with `levipack-forge pack-merge` (the CI workflow does this automatically). **Not tested in-game.**
 
 ## Self-check
 * all ids resolve inside the pack
@@ -19,6 +19,8 @@ Give each one a Molang condition in `animation_conditions` (see `pack_map.todo.j
 * animation oar_rest: unknown key 'oar' dropped
 * resourcepacks/punchy/assets/punchycake/punchy/model_parts_items/animations/punchy_cake_item.animation.json: custom-item animation (needs a Bedrock item attachable)
 * resourcepacks/punchy/assets/punchycake/punchy/model_parts_items/animations/punchy_gift_item.animation.json: custom-item animation (needs a Bedrock item attachable)
+* 1 texture(s) under assets/minecraft/ replace vanilla Java textures; Bedrock uses other paths and names. Map them by hand into the pack; files that live inside the game APK (start screen, materials, cameras) need the AssetsAPI levipack (assetsapi_set_file_resource_pack), see docs/research/levipack-learnings.txt section 6B
+* 22 Java gui/font texture(s) skipped: Java GUI atlases have no Bedrock meaning (use a JSON UI pack)
 * resourcepacks/punchy/assets/punchycake/punchy/model_parts_items/definitions/punchy_birthday_candle.json: Java item model-part definition (Bedrock needs an item + attachable JSON)
 * resourcepacks/punchy/assets/punchycake/punchy/model_parts_items/definitions/punchy_birthday_one.json: Java item model-part definition (Bedrock needs an item + attachable JSON)
 * resourcepacks/punchy/assets/punchycake/punchy/model_parts_items/definitions/punchy_cake.json: Java item model-part definition (Bedrock needs an item + attachable JSON)
