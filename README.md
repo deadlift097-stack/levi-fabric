@@ -64,6 +64,24 @@ levipack-forge pack-merge out/resource_pack/player.entity.patch.json vanilla/pla
 Status: unit-tested structure and self-check only; **not tested in-game**. Mods that compute animation in Java code
 (Punchy Moves) have no Bedrock animation data to convert, so their pack is nearly empty and the work stays in hooks.
 
+## Native hook targets + pack packaging (v0.4 / v0.5)
+
+* **Packaging fix.** v0.3 wrote the Bedrock resource pack to `resource_pack/`, but the template's package step only copies
+  `resources/`, so the pack never reached the `.levipack`. It is now installed to
+  `resources/minecraft_resource_packs/<Name>/` (the layout working levipacks use) by `convert` and by
+  `levipack-forge pack-install <project>`, which the workflow runs again after `pack-merge`. Packs with no
+  animations/models/sounds/textures are not shipped. Vanilla-namespace and GUI textures are now reported, not skipped silently.
+* **Build-keyed symbol DB** (`levipack_forge/data/`): vtable RVAs for one `libminecraftpe.so` plus 11 statically verified
+  Item virtuals with the instruction words they must start with. `convert` always loads it; `--symbols x.symbols.json` swaps it.
+* **`src/mod/Resolve.cpp`**: resolves those slots at runtime and refuses any that do not match, so another game build
+  skips the feature instead of crashing. See `docs/ANDROID_HOOKING.md` (includes a correction to the Amethyst index mapping).
+* **Real detours (v0.5).** Verified targets get generated detours (pass-through by default, or your C++ body from `overrides/<mod>.json` -> `hooks`), installed with `pl::memory::hook`, cross-checked against the SDK's RTTI resolver, one trampoline per address, subclass overrides included once `so_probe.py --subclasses --merge` has been run. Compiled against the real preloader-android 0.2.2 headers.
+* **`levipack-forge live-test`**: generates the on-device proof project (`Item::getAttackDamage` + N, logged).
+* **`tools/`**: `so_probe.py` (+ `--dump`, `--verify`), `align_vtable.py`, `make_symbols_db.py`.
+
+Status: unit-tested (44 tests, incl. the generated C++ compiled on a host and `so_probe` run on a synthetic aarch64 ELF).
+**Not run against the real 342 MB library or on a device.**
+
 ## What it really converts
 
 Java and Bedrock are different games with different engines. There is no Java runtime inside Bedrock,
@@ -98,6 +116,9 @@ exact Bedrock version before hooking.
 levipack_forge/        classfile parser, bytecode->C++ subset transpiler, solutions (fix advice), symbol index, generator, CLI
 overrides/             per-mod fixes for unsupported calls (survive re-conversion)
 examples/              sample reports generated from the two bundled jars
+tools/                 so_probe.py, align_vtable.py, make_symbols_db.py (symbol DB workflow)
+symbols/source/        the analysed build's dump + Amethyst index list the DB is built from
+docs/research/         the three analysis notes this work is based on
 levipack_forge/template/   the official template files used for every generated project
 reference/             pristine copy of the uploaded template
 .github/workflows/     ci.yml (tests), convert.yml (jar -> .levipack in the cloud)
