@@ -22,6 +22,17 @@ def main(argv=None):
     q = ss.add_parser("search", help="find mangled names containing all given identifiers")
     q.add_argument("index"); q.add_argument("names", nargs="+"); q.add_argument("-n", type=int, default=20)
 
+    v = sub.add_parser("vtable", help="show verified vtable slots for the bundled (or given) symbols.json")
+    v.add_argument("--db", help="symbols.json from tools/so_probe.py")
+
+    d = sub.add_parser("vtdiff", help="slots where DERIVED overrides BASE in a vtable dump (calibration aid)")
+    d.add_argument("dump"); d.add_argument("base"); d.add_argument("derived")
+    d.add_argument("--only-shapes", action="store_true", help="show only slots recognised as tiny getters/constants")
+
+    k = sub.add_parser("slotguess", help="candidate Itanium slots for an Amethyst (MSVC) vfunc index")
+    k.add_argument("dump"); k.add_argument("cls"); k.add_argument("index", type=int)
+    k.add_argument("--want", help='shape filter, e.g. "returns 0" or "getter"')
+
     pm = sub.add_parser("pack-merge", help="merge resource_pack/player.entity.patch.json into the vanilla player.entity.json")
     pm.add_argument("patch"); pm.add_argument("vanilla"); pm.add_argument("-o", "--out", required=True)
 
@@ -31,6 +42,27 @@ def main(argv=None):
         r = convert(a.jar, a.out, a.mc_versions, a.symbols, a.mod_id, a.overrides)
         print(json.dumps(r, indent=2))
         print(f"\nNext: read {r['out']}/CONVERSION_REPORT.md, then build (see README).")
+    elif a.cmd == "vtable":
+        from . import vtable
+        db = vtable.load(a.db)
+        print(f"build sha256 {db['sha256']}  ({db.get('mc_version_string')})")
+        for cls, vs in db["vtables"].items():
+            print(f"{cls:14} " + ", ".join(f"{x['vptr_rva']}({x['slots']})" for x in vs))
+        print("\nverified Item slots:")
+        for n, (s_, r, sig, ev) in vtable.VERIFIED_ITEM_SLOTS.items():
+            print(f"  [{s_:3}] {n:22} {r:#x}  {sig}   <- {ev}")
+    elif a.cmd == "vtdiff":
+        from . import vtdump
+        dump = vtdump.parse(a.dump)
+        for i, kind, rva, ins in vtdump.diff(dump, a.base, a.derived):
+            sh = vtdump.shape(ins)
+            if a.only_shapes and not sh:
+                continue
+            print(f"[{i:3}] {kind:8} {rva:#x}  {sh or ins[:60]}")
+    elif a.cmd == "slotguess":
+        from . import vtdump
+        for i, rva, sh, ins in vtdump.candidates(vtdump.parse(a.dump), a.cls, a.index, a.want):
+            print(f"[{i:3}] {rva:#x}  {sh or '-':28} {ins}")
     elif a.cmd == "pack-merge":
         from .bedrock_pack import merge_player_entity
         v = json.load(open(a.vanilla, encoding="utf-8-sig"))
