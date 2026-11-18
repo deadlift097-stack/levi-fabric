@@ -30,6 +30,7 @@ jobs:
           esac
       - name: Convert
         run: |
+          # no --symbols needed: the bundled build-keyed vtable DB is always used; symbols.txt only adds mangled-name hints
           SYM=""; [ -f symbols.txt ] && SYM="--symbols symbols.txt"
           OV="${{ inputs.overrides }}"
           if [ -z "$OV" ]; then
@@ -47,6 +48,9 @@ jobs:
                  -o "generated/resource_pack/entity/player.entity.json" \
             || echo "::warning::vanilla player.entity.json not available; pack built without the animation wiring"
           (cd generated/resource_pack && rm -f player.entity.patch.json.bak && zip -qr "../${MID}.mcpack" . -x PACK_REPORT.md pack_map.todo.json)
+      - name: Ship the (merged) resource pack inside the .levipack
+        # The package step only copies resources/. Re-run after pack-merge so entity/player.entity.json is included.
+        run: levipack-forge pack-install generated
       - name: Set up Android NDK (uses the SDK preinstalled on the runner)
         run: |
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
@@ -72,6 +76,7 @@ jobs:
             generated/MANUAL_WORK.md
             generated/overrides.todo.json
             generated/*.mcpack
+            generated/resources/minecraft_resource_packs
             generated/resource_pack/PACK_REPORT.md
             generated/resource_pack/pack_map.todo.json
       - uses: actions/upload-artifact@v4
